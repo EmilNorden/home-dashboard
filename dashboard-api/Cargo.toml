@@ -1,0 +1,20 @@
+[package]
+name = "dashboard-api"
+version = "0.1.0"
+edition = "2021"
+authors = ["Emil Nordén <emilnorden@yahoo.se>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "0.6", features = ['http', 'axum'] }
+worker-macros = { version = "0.6", features = ['http'] }
+axum = { version = "0.8", default-features = false, features = ["json"] }
+tower-service = "0.3.3"
+serde = { version = "1.0.228", features = ["derive"] }
+chrono = { version = "0.4.42", features = ["serde"]}
+reqwest = { version = "0.12", features = ["blocking"] }
+oauth2 = { version = "5.0.0", features = ["reqwest"]}
+anyhow = "1.0.100"
+log = "0.4.28"

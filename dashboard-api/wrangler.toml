@@ -1,0 +1,10 @@
+name = "dashboard-api"
+main = "build/index.js"
+compatibility_date = "2025-10-14"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[vars]
+VASTTRAFIK_CLIENT_ID = "KU8kPVPNZGAeFEZZgjX5dS6aulca"
+VASTTRAFIK_TOKEN_URL = "https://ext-api.vasttrafik.se/token"
