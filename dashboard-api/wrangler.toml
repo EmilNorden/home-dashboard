@@ -8,3 +8,33 @@ command = "cargo install -q worker-build && worker-build --release"
 [vars]
 VASTTRAFIK_CLIENT_ID = "KU8kPVPNZGAeFEZZgjX5dS6aulca"
 VASTTRAFIK_TOKEN_URL = "https://ext-api.vasttrafik.se/token"
+
+[durable_objects]
+bindings = [
+    { name = "TOKEN_KEEPER", class_name = "TokenKeeper" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TokenKeeper"]
+
+[[d1_databases]]
+binding = "dashboard_db"
+database_name = "dashboard-db"
+database_id = "16054ba1-b1a9-4190-a1bb-891a4c422e10"
+
+[observability]
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[[kv_namespaces]]
+binding = "DASH_VAR"
+id = "ebfde933d27f462cadea167aa4e9ccdd"
+
+[[secrets_store_secrets]]
+binding = "VASTTRAFIK_CLIENT_SECRET"
+secret_name = "VASTTRAFIK_CLIENT_SECRET"
+store_id = "a45e769cf1c94df59905511f8e400442"

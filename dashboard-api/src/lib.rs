@@ -1,169 +1,248 @@
+mod models;
 pub mod token_manager;
+mod departures;
 
-use std::collections::HashMap;
-use axum::http::StatusCode;
-use axum::{routing::get, Json, Router};
-use chrono::{DateTime, Duration, Utc};
-use oauth2::basic::{BasicClient, BasicErrorResponse, BasicRevocationErrorResponse, BasicTokenIntrospectionResponse, BasicTokenResponse};
-use oauth2::{AuthType, ClientId, ClientSecret, EndpointNotSet, EndpointSet, StandardRevocableToken, TokenResponse, TokenUrl};
+use oauth2::basic::BasicClient;
+use oauth2::{ClientId, ClientSecret, TokenResponse, TokenUrl};
 use serde::{Deserialize, Serialize};
-use tower_service::Service;
+use std::collections::HashMap;
 use worker::*;
+use crate::departures::{get_departures, Departure, Departures};
 
-fn router() -> Router {
-    Router::new()
-        .route("/", get(root))
-        .route("/v1/dashboard", get(dashboard))
-}
 
 #[event(fetch)]
-async fn fetch(
-    req: HttpRequest,
-    _env: Env,
-    _ctx: Context,
-) -> Result<axum::http::Response<axum::body::Body>> {
-
-    Ok(router().call(req).await?)
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    console_log!("A new request!!");
+    Router::new()
+        .get("/", |_req, _ctx| Response::ok("ok"))
+        .get_async("/v1/dashboard", dashboard)
+        .get_async("/v0/dashboard", fake_dashboard)
+        .get_async("/test", test)
+        .run(req, env)
+        .await
 }
 
-#[event(scheduled)]
-async fn refresh(_ev: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    let client_id = env.var("VASTTRAFIK_CLIENT_ID")
-        .expect("Missing VASTTRAFIK_CLIENT_ID env var");
-    let client_secret = env.secret("VASTTRAFIK_CLIENT_SECRET")
-        .expect("Missing VASTTRAFIK_CLIENT_SECRET env var");
-    let vasttrafik_token_url = env.var("VASTTRAFIK_TOKEN_URL")
-        .expect("Missing VASTTRAFIK_TOKEN_URL env var");
+pub async fn test(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    let token = get_vasttrafik_token(&_ctx.env).await?;
 
-    let vasttrafik_token_url = TokenUrl::new(vasttrafik_token_url.to_string())
-        .expect("Unable to parse VASTTRAFIK_TOKEN_URL as a valid URL");
+    Response::ok(token)
+}
 
-    let mut client = BasicClient::new(ClientId::new(client_id.to_string()))
-        .set_client_secret(ClientSecret::new(client_secret.to_string()))
-        .set_auth_type(AuthType::BasicAuth)
-        .set_token_uri(vasttrafik_token_url);
+pub async fn fake_dashboard(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    let data = DashboardData {
+        departures: DepartureData::Results(vec![
+            Departures {
+                stop_name: "Borås C".to_string(),
+                departures: vec![
+                    Departure {
+                        line_name: "Buss X".to_string(),
+                        time: Default::default(),
+                    }
+                ],
+            }
+        ]),
+        weather: WeatherData::Results(Weather {
+            temperature: 0,
+            rain_likely: false,
+        })
+    };
 
-    let http_client = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("Unable to build HTTP client");
-
-    let token_response = client
-        .exchange_client_credentials()
-        .request_async(&http_client)
-        .await
-        .expect("Unable to obtain client's credentials");
-//token_response.expires_in()
-
+    Response::from_json(&data)
 }
 
 pub async fn root() -> &'static str {
     "Hello Axum!"
 }
 
-pub async fn dashboard() -> (StatusCode, Json<DashboardData>){
-    let json = Json(DashboardData {
-        ferry_departure_times: [
-            Utc::now(),
-            Utc::now(),
-        ],
-        temperature: 18,
-        rain_likely: false,
-    });
+async fn get_vasttrafik_journeys(token: &str, from_gid: &str, to_gid: &str) -> Result<Response> {
+    let headers = Headers::new();
+    headers.append("Authorization", &format!("Bearer {}", token))?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get);
+    init.with_headers(headers);
+    let request = Request::new_with_init(&format!("https://ext-api.vasttrafik.se/pr/v4/journeys?originGid={}&destinationGid={}&dateTimeRelatesTo=departure&limit=2&onlyDirectConnections=true&includeNearbyStopAreas=false&useRealTimeMode=false&includeOccupancy=false&bodSearch=false", from_gid, to_gid), &init)?;
+    Fetch::Request(request).send().await
+}
 
-    (StatusCode::OK, json)
+async fn get_vasttrafik_token(env: &Env) -> Result<String> {
+    console_debug!("get_vasttrafik_token env={:?}", env);
+    let ns = env.durable_object("TOKEN_KEEPER")?;
+    let stub = ns.get_by_name("singleton")?;
+    //console_debug!("before calling DO");
+    let mut resp = stub.fetch_with_str("http://do/token").await?;
+    //console_debug!("after calling DO");
+    //Ok(resp.text().await?)
+    Ok(resp.text().await.unwrap_or_default())
+}
+
+async fn refresh_vasttrafik_token(current_token: &str, env: &Env) -> Result<String> {
+    let ns = env.durable_object("TOKEN_KEEPER")?;
+    let stub = ns.get_by_name("singleton")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(serde_wasm_bindgen::to_value(&RefreshTokenBody {
+        seen_token: current_token.to_string(),
+    })?));
+    let request = Request::new_with_init("http://do/token", &init)?;
+    let mut resp = stub.fetch_with_request(request).await?;
+    Ok(resp.text().await?)
+}
+
+pub async fn dashboard(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let env = ctx.env;
+
+    let db  =env.d1("dashboard_db")?;
+
+    let departure_data = match get_departures(env, &db).await {
+        Ok(departures) => DepartureData::Results(departures),
+        Err(e) => DepartureData::Error(format!("An error occurred: {}", e))
+    };
+
+    let headers = Headers::new();
+    headers.set("content-type", "application/json; charset=utf-8")?;
+
+    let data = DashboardData {
+        departures: departure_data,
+        weather: WeatherData::Results(Weather {
+            temperature: 0,
+            rain_likely: false,
+        })
+    };
+
+    Ok(Response::from_json(&data)?.with_headers(headers))
 }
 
 #[derive(Serialize)]
-pub struct DashboardData {
-    pub ferry_departure_times: [chrono::DateTime<Utc>; 2],
+pub enum DepartureData {
+    #[serde(rename = "results")]
+    Results(Vec<Departures>),
+    #[serde(rename = "error")]
+    Error(String)
+}
+
+#[derive(Serialize)]
+pub enum WeatherData {
+    #[serde(rename = "results")]
+    Results(Weather),
+    #[serde(rename = "error")]
+    Error(String)
+}
+
+#[derive(Serialize)]
+pub struct Weather {
     pub temperature: i8,
     pub rain_likely: bool,
 }
 
+#[derive(Serialize)]
+pub struct DashboardData {
+    pub departures: DepartureData,
+    pub weather: WeatherData,
+}
+
+
 #[durable_object]
 pub struct TokenKeeper {
+    state: State,
+    env: Env,
     tokens: HashMap<String, String>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct RefreshTokenBody {
+    pub seen_token: String,
+}
 
 impl DurableObject for TokenKeeper {
     fn new(state: State, env: Env) -> Self {
-        /*let client_id = env.var("VASTTRAFIK_CLIENT_ID")
-            .expect("Missing VASTTRAFIK_CLIENT_ID env var");
-        let client_secret = env.secret("VASTTRAFIK_CLIENT_SECRET")
-            .expect("Missing VASTTRAFIK_CLIENT_SECRET env var");
-        let vasttrafik_token_url = env.var("VASTTRAFIK_TOKEN_URL")
-            .expect("Missing VASTTRAFIK_TOKEN_URL env var");
-
-        let vasttrafik_token_url = TokenUrl::new(vasttrafik_token_url.to_string())
-            .expect("Unable to parse VASTTRAFIK_TOKEN_URL as a valid URL");
-
-        let oauth = BasicClient::new(ClientId::new(client_id.to_string()))
-            .set_client_secret(ClientSecret::new(client_secret.to_string()))
-            .set_auth_type(AuthType::BasicAuth)
-            .set_token_uri(vasttrafik_token_url);*/
         Self {
-            tokens: HashMap::new()
+            state,
+            env,
+            tokens: HashMap::new(),
         }
     }
 
-    async fn fetch(&self, req: Request) -> Result<Response> {
+    async fn fetch(&self, mut req: Request) -> Result<Response> {
         match (req.method(), req.path().as_str()) {
             (Method::Get, "/token") => {
-                req.query()
+                match self
+                    .state
+                    .storage()
+                    .get::<String>(TokenKeeper::VASTTRAFIK_TOKEN)
+                    .await
+                {
+                    Ok(token) => Response::ok(token),
+                    Err(_) => match self.refresh_access_token().await {
+                        Ok(token) => Response::ok(token),
+                        Err(e) => Response::error(e.to_string(), 500),
+                    },
+                }
             }
-        }
-        /*match (req.method(), req.path().as_str()) {
-            (Method::Get, "/token") => {
-                let access_token: AccessToken = self.state.storage().get("ACCESS_TOKEN")
+            (Method::Post, "/token") => {
+                let body: RefreshTokenBody = req.json().await?;
+                let stored_token = self
+                    .state
+                    .storage()
+                    .get::<String>(TokenKeeper::VASTTRAFIK_TOKEN)
                     .await?;
-
-                let current_time = Utc::now();
-                if access_token.expiry_date_utc() < current_time {
-                    Response::ok(access_token.token)
+                if body.seen_token == stored_token {
+                    Response::ok(self.refresh_access_token().await.unwrap())
+                } else {
+                    Response::ok(stored_token)
                 }
-                else {
-                    let access_token = self.refresh_access_token().await.unwrap();
-
-                    Response::ok(access_token)
-                }
-            },
-            _ => Response::error("Not found", 404)
-        }*/
-        Response::ok("OK")
+            }
+            _ => Response::error("Not found", 404),
+        }
     }
 
     async fn alarm(&self) -> worker::Result<Response> {
-        //self.refresh_access_token().await.unwrap();
-
         Response::ok("OK")
     }
 }
-/*
+
 impl TokenKeeper {
+    const VASTTRAFIK_TOKEN: &'static str = "VT_ACCESS_TOKEN";
+    const KV_STORE: &'static str = "DASH_VAR";
+    const VASTTRAFIK_CLIENTID_KEY: &'static str = "VASTTRAFIK_CLIENTID";
+    const VASTTRAFIK_CLIENTSECRET_KEY: &'static str = "VASTTRAFIK_CLIENT_SECRET";
     async fn refresh_access_token(&self) -> anyhow::Result<String> {
+        let kv_store = self.env.kv(Self::KV_STORE)?;
+        let token_url = kv_store
+            .get("VASTTRAFIK_TOKEN_URL")
+            .text()
+            .await
+            .unwrap()
+            .unwrap();
+        let client_id = kv_store
+            .get(Self::VASTTRAFIK_CLIENTID_KEY)
+            .text()
+            .await
+            .unwrap()
+            .unwrap();
+        let client_secret = self
+            .env
+            .secret_store(Self::VASTTRAFIK_CLIENTSECRET_KEY)?.get().await?.unwrap();
+        let client = BasicClient::new(ClientId::new(client_id))
+            .set_client_secret(ClientSecret::new(client_secret))
+            .set_token_uri(TokenUrl::new(token_url)?);
+
         let http_client = reqwest::ClientBuilder::new()
-            .redirect(reqwest::redirect::Policy::none())
+            //.redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Unable to build HTTP client");
 
-        let token_response = self.oauth
+        let token_response = client
             .exchange_client_credentials()
             .request_async(&http_client)
             .await?;
 
-        let expires_at = Duration::from_std(token_response.expires_in().unwrap())?;
         let token = token_response.access_token().secret().clone();
-        let access_token = AccessToken {
-            token: token.clone(),
-            expires_at,
-            created_at: Utc::now(),
-        };
 
-        self.state.storage().put("ACCESS_TOKEN", access_token).await?;
-        self.state.storage().set_alarm(expires_at.to_std().unwrap()).await?;
+        self.state
+            .storage()
+            .put(Self::VASTTRAFIK_TOKEN, token.clone())
+            .await?;
 
-        anyhow::Ok(token)
+        Ok(token)
     }
-}*/
+}
