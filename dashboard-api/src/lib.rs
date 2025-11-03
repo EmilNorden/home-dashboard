@@ -1,5 +1,4 @@
 mod models;
-pub mod token_manager;
 mod departures;
 
 use oauth2::basic::BasicClient;
@@ -22,10 +21,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .await
 }
 
-pub async fn test(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
-    let token = get_vasttrafik_token(&_ctx.env).await?;
 
-    Response::ok(token)
+pub async fn test(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    Response::ok("ok")
 }
 
 pub async fn fake_dashboard(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
