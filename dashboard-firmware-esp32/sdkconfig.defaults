@@ -1,0 +1,28 @@
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
+
+# Use this to set FreeRTOS kernel tick frequency to 1000 Hz (100 Hz by default).
+# This allows to use 1 ms granularity for thread sleeps (10 ms by default).
+#CONFIG_FREERTOS_HZ=1000
+
+# Workaround for https://github.com/espressif/esp-idf/issues/7631
+#CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
+#CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n
+
+# --- Bluetooth / NimBLE ---
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y     # (saves RAM on classic ESP32)
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MAX_BONDS=3
+
+# --- Wi-Fi Provisioning (BLE scheme) ---
+CONFIG_WIFI_PROV_BLE=y
+# (runtime security is via PoP, but enabling the menu is helpful)
+CONFIG_WIFI_PROV_AUTOSTOP_TIMEOUT=30
+CONFIG_WIFI_PROV_SCAN_MAX_ENTRIES=16
+
+# Wi-Fi driver (ESP-IDF v5.x)
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_STA_AUTO=y        # station mode support (typical)
